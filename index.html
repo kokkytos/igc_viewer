@@ -1,0 +1,1163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Paraglider IGC Flight Viewer</title>
+
+    <!-- OpenLayers -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@9.2.4/ol.css">
+    <script src="https://cdn.jsdelivr.net/npm/ol@9.2.4/dist/ol.js"></script>
+
+    <!-- CesiumJS -->
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.115/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.115/Build/Cesium/Cesium.js"></script>
+
+    <style>
+        html, body { width:100%; height:100%; margin:0; padding:0; overflow:hidden; font-family:Arial,sans-serif; background:#000; }
+        #olContainer, #cesiumContainer { position:absolute; inset:0; width:100%; height:100%; }
+        #cesiumContainer { display:none; }
+
+        /* Wind canvas overlay (used by both OL and Cesium in 2D) */
+        #dropZone {
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; z-index: 2000;
+            background: rgba(10,10,15,0.92);
+            color: #ccc; font-family: Arial, sans-serif;
+        }
+        #dropZone.hidden { display: none; }
+        #dropZone .drop-box {
+            border: 2px dashed #555; border-radius: 12px;
+            padding: 48px 56px; text-align: center; cursor: pointer;
+            transition: border-color .2s, background .2s;
+        }
+        #dropZone .drop-box:hover, #dropZone .drop-box.over {
+            border-color: #0af; background: rgba(0,160,255,0.08);
+        }
+        #dropZone .drop-icon { font-size: 52px; margin-bottom: 14px; }
+        #dropZone h2 { margin: 0 0 8px; font-size: 18px; color: #fff; }
+        #dropZone p  { margin: 0; font-size: 13px; color: #888; }
+        #dropZone .err { margin-top: 14px; font-size: 12px; color: #f66; min-height: 16px; }
+        #igcFileInput { display: none; }
+
+        #windCanvas {
+            position: absolute; inset: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 5;
+            display: none;
+        }
+        #controlPanel {
+            display: none;
+            position:absolute; top:10px; left:10px; z-index:1000;
+            background:rgba(30,30,30,0.92); padding:8px 10px; border-radius:8px;
+            color:white; box-shadow:0 4px 8px rgba(0,0,0,0.4); min-width:178px;
+        }
+        #controlPanel h3 { margin:0 0 6px 0; font-size:11px; letter-spacing:.5px; text-transform:uppercase; color:#aaa; }
+        .section-label { font-size:10px; color:#888; text-transform:uppercase; letter-spacing:.4px; margin:6px 0 3px 0; }
+        .btn-group { display:flex; gap:4px; }
+        .icon-btn {
+            background:#333; border:1px solid #555; color:#ddd;
+            padding:5px 7px; border-radius:4px; cursor:pointer;
+            font-size:11px; line-height:1; flex:1; text-align:center; transition:background .15s;
+        }
+        .icon-btn:hover { background:#444; }
+        .icon-btn.active { background:#0069d9; border-color:#0056b3; color:#fff; }
+        .icon-btn.active-orange { background:#cc7a00; border-color:#b36b00; color:#fff; }
+        .icon-btn.active-green { background:#1a8c3a; border-color:#157a32; color:#fff; }
+        .playback-group { display:flex; gap:4px; align-items:center; }
+        .play-btn {
+            background:#333; border:1px solid #555; color:#ddd;
+            padding:5px 10px; border-radius:4px; cursor:pointer;
+            font-size:14px; line-height:1; flex:1; text-align:center; transition:background .15s;
+        }
+        .play-btn:hover { background:#444; }
+        .play-btn.active { background:#1a8c3a; border-color:#157a32; color:#fff; }
+        .speed-row { display:flex; align-items:center; gap:4px; margin-top:4px; }
+        .speed-row label { font-size:10px; color:#888; white-space:nowrap; }
+        .speed-row input[type=range] { flex:1; height:3px; accent-color:#0069d9; }
+        .speed-val { font-size:10px; color:#bbb; min-width:24px; text-align:right; }
+        .divider { border:none; border-top:1px solid #444; margin:6px 0; }
+        #windStatus { font-size:9px; color:#888; margin-top:3px; min-height:12px; }
+    </style>
+</head>
+<body>
+<div id="olContainer"></div>
+<div id="cesiumContainer"></div>
+<canvas id="windCanvas"></canvas>
+
+<div id="dropZone">
+    <div class="drop-box" id="dropBox" onclick="document.getElementById('igcFileInput').click()">
+        <div class="drop-icon">🪂</div>
+        <h2>Drop your IGC file here</h2>
+        <p>or click to browse</p>
+        <div class="err" id="dropErr"></div>
+    </div>
+</div>
+<input type="file" id="igcFileInput" accept=".igc">
+
+<div id="controlPanel">
+    <h3>✈ Flight Viewer</h3>
+
+    <div class="section-label">Engine</div>
+    <div class="btn-group">
+        <button id="btnEngineOL"     class="icon-btn active" onclick="switchEngine('ol')"     title="OpenLayers 2D">🗺 OL</button>
+        <button id="btnEngineCesium" class="icon-btn"        onclick="switchEngine('cesium')" title="Cesium 3D">🌍 Cesium</button>
+    </div>
+
+    <div id="cesiumControls" style="display:none">
+        <hr class="divider">
+        <div class="section-label">View</div>
+        <div class="btn-group">
+            <button id="btn3DAnimation" class="icon-btn active" onclick="switchMode('3D-Anim')"   title="3D Chase Cam">▶ Chase</button>
+            <button id="btn3DStatic"    class="icon-btn"        onclick="switchMode('3D-Static')" title="3D Static Path">📍 Path</button>
+            <button id="btn2D"          class="icon-btn"        onclick="switchMode('2D')"         title="2D Overhead">🗺 2D</button>
+        </div>
+    </div>
+
+    <hr class="divider">
+
+    <div class="section-label">Wind Layer</div>
+    <div class="btn-group">
+        <button id="windToggleBtn" class="icon-btn" onclick="toggleWind()" title="Toggle wind layer">💨 Wind: OFF</button>
+    </div>
+    <div id="windStatus">Not loaded</div>
+
+    <hr class="divider">
+
+    <div class="section-label">Playback</div>
+    <div class="playback-group">
+        <button id="playBtn"  class="play-btn active" onclick="playFlight()"  title="Play">▶</button>
+        <button id="pauseBtn" class="play-btn"        onclick="pauseFlight()" title="Pause">⏸</button>
+        <button id="stopBtn"  class="play-btn"        onclick="stopFlight()"  title="Stop">⏹</button>
+    </div>
+    <div class="speed-row">
+        <label>Speed</label>
+        <input type="range" id="speedSlider" min="1" max="50" value="5" oninput="setSpeed(this.value)">
+        <span class="speed-val" id="speedVal">5×</span>
+    </div>
+
+    <hr class="divider">
+
+    <div class="btn-group" id="rotateRow" style="display:none">
+        <button id="rotateBtn" class="icon-btn active-orange" onclick="toggleTerrainRotation()" title="Toggle terrain rotation">🔄 Rotate</button>
+    </div>
+</div>
+
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// SHARED STATE
+// ─────────────────────────────────────────────────────────────────────────────
+let flightRecords     = [];
+let flightJulianTimes = [];
+let currentEngine     = 'ol';
+let currentMode       = '3D-Anim';
+let isPlaying         = false;
+let speedMultiplier   = 5;
+
+let clockSeconds  = 0;
+let flightDuration = 0;
+let clockInterval  = null;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENGINE SWITCH
+// ─────────────────────────────────────────────────────────────────────────────
+function switchEngine(engine) {
+    currentEngine = engine;
+    document.getElementById('olContainer').style.display     = engine === 'ol'     ? 'block' : 'none';
+    document.getElementById('cesiumContainer').style.display = engine === 'cesium' ? 'block' : 'none';
+    document.getElementById('cesiumControls').style.display  = engine === 'cesium' ? 'block' : 'none';
+    document.getElementById('rotateRow').style.display       = engine === 'cesium' ? 'flex'  : 'none';
+    document.getElementById('btnEngineOL').classList.toggle('active',     engine === 'ol');
+    document.getElementById('btnEngineCesium').classList.toggle('active', engine === 'cesium');
+
+    if (engine === 'cesium') {
+        initCesiumIfNeeded();
+    } else {
+        // Hide 3D wind readout when not in Cesium
+        if (cesiumWindInfoCanvas) cesiumWindInfoCanvas.style.display = 'none';
+    }
+    // Resize OL so it fills properly after being shown
+    if (engine === 'ol' && olMap) olMap.updateSize();
+    // Wind canvas visibility handled by wind system
+    updateWindCanvasVisibility();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOGICAL CLOCK
+// ─────────────────────────────────────────────────────────────────────────────
+const TICK_MS = 100;
+
+function startClock() {
+    if (clockInterval) return;
+    clockInterval = setInterval(() => {
+        clockSeconds += (TICK_MS / 1000) * speedMultiplier;
+        if (clockSeconds >= flightDuration) {
+            clockSeconds = flightDuration;
+            stopFlight();
+            return;
+        }
+        onClockTick();
+    }, TICK_MS);
+}
+
+function stopClock() {
+    if (clockInterval) { clearInterval(clockInterval); clockInterval = null; }
+}
+
+function onClockTick() {
+    if (currentEngine === 'ol') {
+        syncOLMarker();
+    } else if (viewer && flightRecords.length) {
+        const t = Cesium.JulianDate.addSeconds(viewer.clock.startTime, clockSeconds, new Cesium.JulianDate());
+        viewer.clock.currentTime = t;
+    }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLAYBACK
+// ─────────────────────────────────────────────────────────────────────────────
+function playFlight() {
+    if (flightRecords.length === 0) return;
+    isPlaying = true;
+    setPlayButtons('play');
+    if (currentEngine === 'cesium' && viewer) {
+        const t = Cesium.JulianDate.addSeconds(viewer.clock.startTime, clockSeconds, new Cesium.JulianDate());
+        viewer.clock.currentTime = t;
+        viewer.clock.shouldAnimate = true;
+    }
+    startClock();
+}
+
+function pauseFlight() {
+    isPlaying = false;
+    stopClock();
+    setPlayButtons('pause');
+    if (currentEngine === 'cesium' && viewer) viewer.clock.shouldAnimate = false;
+}
+
+function stopFlight() {
+    isPlaying = false;
+    stopClock();
+    clockSeconds = 0;
+    setPlayButtons('stop');
+    if (currentEngine === 'cesium' && viewer) {
+        viewer.clock.shouldAnimate = false;
+        viewer.clock.currentTime = viewer.clock.startTime.clone();
+    }
+    wallLastIndex = -1;
+    if (wallPrimitive && viewer) { viewer.scene.primitives.remove(wallPrimitive); wallPrimitive = null; }
+    syncOLMarker();
+}
+
+function setSpeed(val) {
+    speedMultiplier = Number(val);
+    document.getElementById('speedVal').textContent = val + '×';
+    if (currentEngine === 'cesium' && viewer) viewer.clock.multiplier = speedMultiplier;
+}
+
+function setPlayButtons(state) {
+    document.getElementById('playBtn').classList.toggle('active',  state === 'play');
+    document.getElementById('pauseBtn').classList.toggle('active', state === 'pause');
+    document.getElementById('stopBtn').classList.toggle('active',  state === 'stop');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IGC PARSING
+// ─────────────────────────────────────────────────────────────────────────────
+function parseIGC(text) {
+    const lines = text.split('\n');
+    const records = [];
+    let dateStr = new Date().toISOString().slice(0, 10);
+    const hRx = /^HFDTE(\d{2})(\d{2})(\d{2})/;
+    const bRx = /^B(\d{2})(\d{2})(\d{2})(\d{2})(\d{5})([NS])(\d{3})(\d{5})([EW])[AV](\d{5})(\d{5})/;
+
+    for (const line of lines) {
+        const hm = line.trim().match(hRx);
+        if (hm) {
+            const yy = parseInt(hm[3], 10);
+            const yyyy = yy < 70 ? 2000 + yy : 1900 + yy;
+            dateStr = `${yyyy}-${hm[2].padStart(2,'0')}-${hm[1].padStart(2,'0')}`;
+            continue;
+        }
+        const m = line.trim().match(bRx);
+        if (!m) continue;
+        const isoDateTime = `${dateStr}T${m[1]}:${m[2]}:${m[3]}Z`;
+        let lat = parseInt(m[4], 10) + parseInt(m[5], 10) / 1000 / 60;
+        if (m[6] === 'S') lat = -lat;
+        let lon = parseInt(m[7], 10) + parseInt(m[8], 10) / 1000 / 60;
+        if (m[9] === 'W') lon = -lon;
+        const alt = parseInt(m[11], 10);
+        records.push({ isoDateTime, lon, lat, alt });
+    }
+    return records;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WIND DATA  (Open-Meteo historical — raw u/v vector components at 10 m & 100 m)
+// ─────────────────────────────────────────────────────────────────────────────
+let windEnabled  = false;
+let windData     = null;   // { times[], u10[], v10[], u100[], v100[], lat, lon }
+let windAnimFrame = null;
+let windParticles = [];
+const WIND_PARTICLE_COUNT = 800;
+
+async function loadWindData() {
+    if (windData) return;
+    setWindStatus('Fetching…');
+
+    const lats = flightRecords.map(r => r.lat);
+    const lons = flightRecords.map(r => r.lon);
+    const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+    const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+    // centre of bounding box
+    const clat = ((minLat + maxLat) / 2).toFixed(5);
+    const clon = ((minLon + maxLon) / 2).toFixed(5);
+
+    const date0 = flightRecords[0].isoDateTime.slice(0, 10);
+    const date1 = flightRecords.at(-1).isoDateTime.slice(0, 10);
+
+    // Open-Meteo archive API provides wind_speed + wind_direction at 10 m & 100 m.
+    // Direction is "from" (meteorological), so:
+    //   u = -speed * sin(dir_rad)  →  eastward component (+east)
+    //   v = -speed * cos(dir_rad)  →  northward component (+north)
+    const url = `https://archive-api.open-meteo.com/v1/archive` +
+        `?latitude=${clat}&longitude=${clon}` +
+        `&start_date=${date0}&end_date=${date1}` +
+        `&hourly=wind_speed_10m,wind_direction_10m,wind_speed_100m,wind_direction_100m` +
+        `&wind_speed_unit=ms&timezone=UTC`;
+
+    try {
+        const res  = await fetch(url);
+        const json = await res.json();
+        if (json.error) throw new Error(json.reason || 'API error');
+        const h = json.hourly;
+
+        const toRad = d => d * Math.PI / 180;
+        windData = {
+            times: h.time.map(t => new Date(t + ':00Z').getTime()),
+            u10:  h.wind_speed_10m.map( (s,i) => -s * Math.sin(toRad(h.wind_direction_10m[i]))),
+            v10:  h.wind_speed_10m.map( (s,i) => -s * Math.cos(toRad(h.wind_direction_10m[i]))),
+            u100: h.wind_speed_100m.map((s,i) => -s * Math.sin(toRad(h.wind_direction_100m[i]))),
+            v100: h.wind_speed_100m.map((s,i) => -s * Math.cos(toRad(h.wind_direction_100m[i]))),
+            lat: parseFloat(clat),
+            lon: parseFloat(clon),
+        };
+        setWindStatus(`Loaded · ${date0} · ${windData.times.length}h`);
+    } catch(e) {
+        setWindStatus('Error: ' + e.message);
+        windEnabled = false;
+        updateWindBtn();
+    }
+}
+
+// Get interpolated u,v at a given Unix ms and altitude (m).
+// Blends linearly between 10 m and 100 m levels; above 100 m stays at 100 m.
+function windUVatTime(ms, altM) {
+    if (!windData) return { u: 0, v: 0 };
+    const times = windData.times;
+    let idx = times.findIndex(t => t > ms);
+    if (idx <= 0) idx = 1;
+    if (idx >= times.length) idx = times.length - 1;
+    const t0 = times[idx-1], t1 = times[idx];
+    const tf = t1 > t0 ? (ms - t0) / (t1 - t0) : 0;
+
+    // Interpolate each level in time
+    const lerp = (a, b) => a + (b - a) * tf;
+    const u10  = lerp(windData.u10[idx-1],  windData.u10[idx]);
+    const v10  = lerp(windData.v10[idx-1],  windData.v10[idx]);
+    const u100 = lerp(windData.u100[idx-1], windData.u100[idx]);
+    const v100 = lerp(windData.v100[idx-1], windData.v100[idx]);
+
+    // Blend between altitude levels (clamp to [0,1])
+    const alt = (altM == null) ? 100 : altM;
+    const af = Math.min(1, Math.max(0, (alt - 10) / 90));
+    return { u: u10 + (u100 - u10) * af, v: v10 + (v100 - v10) * af };
+}
+
+function setWindStatus(msg) {
+    document.getElementById('windStatus').textContent = msg;
+}
+
+function updateWindBtn() {
+    const btn = document.getElementById('windToggleBtn');
+    btn.classList.toggle('active-green', windEnabled);
+    btn.textContent = windEnabled ? '💨 Wind: ON' : '💨 Wind: OFF';
+}
+
+async function toggleWind() {
+    windEnabled = !windEnabled;
+    updateWindBtn();
+    updateWindCanvasVisibility();
+    if (windEnabled) {
+        await loadWindData();
+        if (windEnabled) {
+            startWindAnimation();           // OL canvas particles (also runs frame loop)
+            if (currentEngine === 'cesium' && viewer) startCesiumWind();
+        }
+    } else {
+        stopWindAnimation();
+        if (viewer) stopCesiumWind();
+    }
+}
+
+function updateWindCanvasVisibility() {
+    const canvas = document.getElementById('windCanvas');
+    canvas.style.display = (windEnabled && currentEngine === 'ol') ? 'block' : 'none';
+    if (windEnabled && currentEngine === 'ol') resizeWindCanvas();
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WIND PARTICLE ANIMATION  (canvas overlay — works for OL; Cesium gets
+//  its own postRender canvas approach below)
+// ─────────────────────────────────────────────────────────────────────────────
+function resizeWindCanvas() {
+    const canvas = document.getElementById('windCanvas');
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+
+window.addEventListener('resize', () => {
+    resizeWindCanvas();
+    initWindParticles();
+});
+
+function initWindParticles() {
+    windParticles = [];
+    for (let i = 0; i < WIND_PARTICLE_COUNT; i++) {
+        windParticles.push(randomParticle());
+    }
+}
+
+function randomParticle() {
+    return {
+        x: Math.random() * window.innerWidth,
+        y: Math.random() * window.innerHeight,
+        age: Math.random() * 120,
+        maxAge: 80 + Math.random() * 80
+    };
+}
+
+// Map lon/lat to canvas pixel via OL
+function lonLatToCanvas(lon, lat) {
+    if (!olMap) return null;
+    const px = olMap.getPixelFromCoordinate(ol.proj.fromLonLat([lon, lat]));
+    return px;
+}
+
+// Map canvas pixel to lon/lat via OL
+function canvasToLonLat(x, y) {
+    if (!olMap) return null;
+    const coord = olMap.getCoordinateFromPixel([x, y]);
+    return ol.proj.toLonLat(coord);
+}
+
+// Degrees per meter at a given latitude
+const DEG_PER_M_LAT = 1 / 111320;
+function degPerMLon(lat) { return 1 / (111320 * Math.cos(lat * Math.PI / 180)); }
+
+function startWindAnimation() {
+    initWindParticles();
+    resizeWindCanvas();
+    if (windAnimFrame) cancelAnimationFrame(windAnimFrame);
+
+    function frame() {
+        if (!windEnabled) return;
+        windAnimFrame = requestAnimationFrame(frame);
+
+        if (currentEngine === 'ol') {
+            drawWindOL();
+        }
+        // Cesium wind is drawn in its own postRender hook
+    }
+    windAnimFrame = requestAnimationFrame(frame);
+}
+
+function stopWindAnimation() {
+    if (windAnimFrame) { cancelAnimationFrame(windAnimFrame); windAnimFrame = null; }
+    const canvas = document.getElementById('windCanvas');
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawWindOL() {
+    const canvas = document.getElementById('windCanvas');
+    if (canvas.style.display === 'none') return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+
+    // Fade existing trails
+    ctx.fillStyle = 'rgba(0,0,0,0.06)';
+    ctx.fillRect(0, 0, W, H);
+
+    if (!windData || !olMap) return;
+
+    const flightMs = new Date(flightRecords[0].isoDateTime).getTime() + clockSeconds * 1000;
+    const { u, v } = windUVatTime(flightMs, 100);
+
+    // Compute pixel-per-second movement for a particle at map centre
+    const cCoord = olMap.getView().getCenter();
+    const cLL    = ol.proj.toLonLat(cCoord);
+    const cLat   = cLL[1];
+    const res    = olMap.getView().getResolution(); // metres/pixel (EPSG:3857 approx)
+
+    // u = m/s east, v = m/s north → pixels/tick
+    const pxPerTickU = (u / res) * (TICK_MS / 1000) * speedMultiplier;
+    const pxPerTickV = (v / res) * (TICK_MS / 1000) * speedMultiplier;
+    // In OL canvas Y increases downward, north = negative Y
+    const dx = pxPerTickU;
+    const dy = -pxPerTickV;
+
+    const speed = Math.sqrt(u * u + v * v);
+    const hue   = Math.max(0, 240 - speed * 12); // blue (slow) → red (fast)
+
+    for (const p of windParticles) {
+        p.x += dx;
+        p.y += dy;
+        p.age++;
+
+        if (p.age > p.maxAge || p.x < 0 || p.x > W || p.y < 0 || p.y > H) {
+            Object.assign(p, randomParticle());
+            continue;
+        }
+
+        const alpha = Math.sin((p.age / p.maxAge) * Math.PI) * 0.7;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 1.2, 0, Math.PI * 2);
+        ctx.fillStyle = `hsla(${hue},90%,65%,${alpha})`;
+        ctx.fill();
+    }
+
+    // Wind info overlay
+    drawWindInfo(ctx, u, v, speed);
+}
+
+function drawWindInfo(ctx, u, v, speed) {
+    const dir = (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
+    ctx.font = '11px Arial';
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.fillText(`Wind: ${speed.toFixed(1)} m/s  ${Math.round(dir)}°`, 10, window.innerHeight - 14);
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// APP ENTRY — IGC loaded from user file input or drag-and-drop
+// ─────────────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+    const dropZone  = document.getElementById('dropZone');
+    const dropBox   = document.getElementById('dropBox');
+    const dropErr   = document.getElementById('dropErr');
+    const fileInput = document.getElementById('igcFileInput');
+
+    // File input via click
+    fileInput.addEventListener('change', e => {
+        if (e.target.files[0]) loadIGCFile(e.target.files[0]);
+    });
+
+    // Drag-and-drop
+    dropBox.addEventListener('dragover', e => { e.preventDefault(); dropBox.classList.add('over'); });
+    dropBox.addEventListener('dragleave', ()  => dropBox.classList.remove('over'));
+    dropBox.addEventListener('drop', e => {
+        e.preventDefault();
+        dropBox.classList.remove('over');
+        const file = e.dataTransfer.files[0];
+        if (file) loadIGCFile(file);
+    });
+
+    function loadIGCFile(file) {
+        if (!file.name.toLowerCase().endsWith('.igc')) {
+            dropErr.textContent = 'Please choose an .igc file.';
+            return;
+        }
+        dropErr.textContent = '';
+        const reader = new FileReader();
+        reader.onload = e => {
+            try {
+                flightRecords = parseIGC(e.target.result);
+                if (flightRecords.length < 2) throw new Error('No valid B-records found.');
+            } catch(err) {
+                dropErr.textContent = 'Could not parse file: ' + err.message;
+                return;
+            }
+            buildWindBBox();
+
+            for (const rec of flightRecords) {
+                flightJulianTimes.push(Cesium.JulianDate.fromIso8601(rec.isoDateTime));
+            }
+
+            const t0 = new Date(flightRecords[0].isoDateTime).getTime();
+            const t1 = new Date(flightRecords.at(-1).isoDateTime).getTime();
+            flightDuration = (t1 - t0) / 1000;
+
+            // Show main UI, hide drop zone
+            dropZone.classList.add('hidden');
+            document.getElementById('controlPanel').style.display = 'block';
+
+            initOL();
+            setPlayButtons('stop');
+        };
+        reader.readAsText(file);
+    }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OPENLAYERS
+// ─────────────────────────────────────────────────────────────────────────────
+let olMap = null;
+let olMarkerFeature = null;
+let olTrackLayer = null;
+
+function initOL() {
+    const trackCoords = flightRecords.map(r => ol.proj.fromLonLat([r.lon, r.lat]));
+
+    const trackFeature = new ol.Feature({ geometry: new ol.geom.LineString(trackCoords) });
+    trackFeature.setStyle(new ol.style.Style({
+        stroke: new ol.style.Stroke({ color: '#ff4444', width: 2.5 })
+    }));
+    olTrackLayer = new ol.layer.Vector({
+        source: new ol.source.Vector({ features: [trackFeature] })
+    });
+
+    olMarkerFeature = new ol.Feature({ geometry: new ol.geom.Point(trackCoords[0]) });
+    olMarkerFeature.setStyle(new ol.style.Style({
+        image: new ol.style.Circle({
+            radius: 7,
+            fill:   new ol.style.Fill({ color: '#ffcc00' }),
+            stroke: new ol.style.Stroke({ color: '#333', width: 1.5 })
+        })
+    }));
+    const olMarkerLayer = new ol.layer.Vector({
+        source: new ol.source.Vector({ features: [olMarkerFeature] })
+    });
+
+    olMap = new ol.Map({
+        target: 'olContainer',
+        layers: [
+            new ol.layer.Tile({ source: new ol.source.OSM() }),
+            olTrackLayer,
+            olMarkerLayer
+        ],
+        view: new ol.View({ center: trackCoords[0], zoom: 12 })
+    });
+
+    const extent = olTrackLayer.getSource().getExtent();
+    olMap.getView().fit(extent, { padding: [40, 40, 40, 40], maxZoom: 14 });
+
+    resizeWindCanvas();
+}
+
+function syncOLMarker() {
+    if (!olMarkerFeature || flightRecords.length === 0) return;
+    const t0 = new Date(flightRecords[0].isoDateTime).getTime();
+    const targetMs = t0 + clockSeconds * 1000;
+    let lo = 0, hi = flightRecords.length - 1;
+    while (lo < hi - 1) {
+        const mid = (lo + hi) >> 1;
+        new Date(flightRecords[mid].isoDateTime).getTime() <= targetMs ? (lo = mid) : (hi = mid);
+    }
+    const rA = flightRecords[lo], rB = flightRecords[hi];
+    const tA = new Date(rA.isoDateTime).getTime();
+    const tB = new Date(rB.isoDateTime).getTime();
+    const f  = tB > tA ? (targetMs - tA) / (tB - tA) : 0;
+    const lon = rA.lon + (rB.lon - rA.lon) * f;
+    const lat = rA.lat + (rB.lat - rA.lat) * f;
+    olMarkerFeature.getGeometry().setCoordinates(ol.proj.fromLonLat([lon, lat]));
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CESIUM
+// ─────────────────────────────────────────────────────────────────────────────
+let viewer             = null;
+let cesiumReady        = false;
+let flightEntity       = null;
+let staticLineEntity   = null;
+let trackingRemoveListener = null;
+let terrainRotationEnabled = true;
+
+let wallPrimitive  = null;
+let wallLastIndex  = -1;
+let wallRenderListener = null;
+
+// Cesium 3D wind — BillboardCollection with oriented arrow sprites
+let cesiumWindBillboards = null;  // Cesium.BillboardCollection
+let cesiumWind3DList     = [];    // particle state objects
+let cesiumWindListener   = null;
+let cesiumWindInfoCanvas = null;
+let cesiumWindInfoCtx    = null;
+let cesiumWindLastMs     = 0;
+
+// Per-frame cached wind vector (updated once, read by all particles)
+let _windU = 0, _windV = 0, _windSpeed = 0, _windRotation = 0;
+
+const CESIUM_WIND_COUNT  = 3000;
+const WIND_MAX_AGE_S     = 10;
+const WIND_MIN_AGE_S     = 3;
+const DEG_PER_M_LAT_3D   = 1 / 111320;
+const degPerMLon3D = lat => 1 / (111320 * Math.cos(lat * Math.PI / 180));
+
+// IGC bounding box + 1 km buffer — populated after flightRecords are parsed
+let windBBox = { minLon: 0, maxLon: 0, minLat: 0, maxLat: 0, minAlt: 0, maxAlt: 0 };
+
+function buildWindBBox() {
+    const KM1_LAT = 1000 * DEG_PER_M_LAT_3D;
+    const lats = flightRecords.map(r => r.lat);
+    const lons = flightRecords.map(r => r.lon);
+    const alts = flightRecords.map(r => r.alt);
+    const midLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+    const KM1_LON = 1000 * degPerMLon3D(midLat);
+    windBBox = {
+        minLat: Math.min(...lats) - KM1_LAT,
+        maxLat: Math.max(...lats) + KM1_LAT,
+        minLon: Math.min(...lons) - KM1_LON,
+        maxLon: Math.max(...lons) + KM1_LON,
+        minAlt: Math.max(1, Math.min(...alts) - 200),
+        maxAlt: Math.max(...alts) + 400,
+    };
+}
+
+// ── Arrow sprite factory ──────────────────────────────────────────────────────
+// Returns a data-URL of an arrow pointing UP (north) at speed s m/s.
+// Colour: blue (0 m/s) → cyan → green → yellow → red (≥20 m/s).
+// The billboard .rotation will rotate it to the actual wind heading at runtime.
+const ARROW_W = 24, ARROW_H = 48;   // sprite canvas size
+
+function makeArrowSprite(speed) {
+    const c = document.createElement('canvas');
+    c.width = ARROW_W; c.height = ARROW_H;
+    const ctx = c.getContext('2d');
+
+    // Colour ramp: 0=blue, 5=cyan, 10=green, 15=yellow, 20+=red
+    const hue = Math.max(0, 240 - speed * 12);
+    const sat = 90, lit = 60;
+    const col   = `hsl(${hue},${sat}%,${lit}%)`;
+    const colDim = `hsl(${hue},${sat}%,35%)`;
+
+    const cx = ARROW_W / 2;
+    // Arrow shaft: thin teardrop pointing UP (toward y=0)
+    const headTop = 2, headBot = 20, tailBot = ARROW_H - 3;
+    const hw = 9;    // half-width at widest point of head
+    const sw = 2.5;  // half-width of shaft
+
+    // Gradient along arrow axis (bright tip → dim tail)
+    const grad = ctx.createLinearGradient(cx, headTop, cx, tailBot);
+    grad.addColorStop(0,   col);
+    grad.addColorStop(0.45, col);
+    grad.addColorStop(1,   colDim);
+
+    ctx.beginPath();
+    // Arrowhead (triangle) at top
+    ctx.moveTo(cx,        headTop);          // tip
+    ctx.lineTo(cx + hw,   headBot);          // right shoulder
+    ctx.lineTo(cx + sw,   headBot);          // right shaft
+    ctx.lineTo(cx + sw,   tailBot);          // right tail
+    ctx.lineTo(cx,        tailBot + 3);      // tail point
+    ctx.lineTo(cx - sw,   tailBot);          // left tail
+    ctx.lineTo(cx - sw,   headBot);          // left shaft
+    ctx.lineTo(cx - hw,   headBot);          // left shoulder
+    ctx.closePath();
+
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Thin outline for readability
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.lineWidth   = 1;
+    ctx.stroke();
+
+    return c.toDataURL();
+}
+
+// Build a lookup table of 8 sprites (0–2.5–5–7.5–10–12.5–15–20 m/s)
+const ARROW_SPEEDS = [0, 2.5, 5, 7.5, 10, 12.5, 15, 20];
+const arrowSprites = ARROW_SPEEDS.map(makeArrowSprite);
+
+function getArrowSprite(speed) {
+    // Pick the closest pre-built sprite
+    let best = 0;
+    let bestDiff = Math.abs(speed - ARROW_SPEEDS[0]);
+    for (let i = 1; i < ARROW_SPEEDS.length; i++) {
+        const d = Math.abs(speed - ARROW_SPEEDS[i]);
+        if (d < bestDiff) { bestDiff = d; best = i; }
+    }
+    return arrowSprites[best];
+}
+
+const CAMERA_DISTANCE = 5500;
+const CAMERA_HEIGHT   = 2200;
+
+const PARAGLIDER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <path fill="#ffcc00" d="M64 160C120 80 392 80 448 160 C390 130 122 130 64 160Z"/>
+  <circle cx="256" cy="240" r="18" fill="#ffffff"/>
+  <line x1="256" y1="178" x2="256" y2="222" stroke="#ffffff" stroke-width="6"/>
+</svg>`;
+const paragliderIcon = 'data:image/svg+xml;base64,' + btoa(PARAGLIDER_SVG);
+
+async function initCesiumIfNeeded() {
+    if (cesiumReady) {
+        if (viewer && flightRecords.length) {
+            const t = Cesium.JulianDate.addSeconds(viewer.clock.startTime, clockSeconds, new Cesium.JulianDate());
+            viewer.clock.currentTime = t;
+            viewer.clock.shouldAnimate = isPlaying;
+        }
+        switchMode(currentMode);
+        if (windEnabled) startCesiumWind();
+        return;
+    }
+    cesiumReady = true;
+
+    let terrainProvider;
+    try {
+        terrainProvider = await Cesium.ArcGISTiledElevationTerrainProvider.fromUrl(
+            'https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer'
+        );
+    } catch (e) { terrainProvider = new Cesium.EllipsoidTerrainProvider(); }
+
+    viewer = new Cesium.Viewer('cesiumContainer', {
+        terrainProvider, baseLayerPicker: false, geocoder: false, homeButton: false,
+        sceneModePicker: false, navigationHelpButton: false, animation: false,
+        timeline: false, fullscreenButton: false, infoBox: false,
+        selectionIndicator: false, imageryProvider: false
+    });
+
+    viewer.imageryLayers.removeAll();
+    viewer.imageryLayers.addImageryProvider(
+        await Cesium.ArcGisMapServerImageryProvider.fromUrl(
+            'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer'
+        )
+    );
+
+    viewer.scene.globe.depthTestAgainstTerrain = false;
+    viewer.clock.clockRange  = Cesium.ClockRange.LOOP_STOP;
+    viewer.clock.multiplier  = speedMultiplier;
+    viewer.clock.shouldAnimate = false;
+
+    viewer.clock.onTick.addEventListener(() => {
+        if (!isPlaying || currentEngine !== 'cesium') return;
+        clockSeconds = Cesium.JulianDate.secondsDifference(viewer.clock.currentTime, viewer.clock.startTime);
+        if (Cesium.JulianDate.compare(viewer.clock.currentTime, viewer.clock.stopTime) >= 0) stopFlight();
+    });
+
+    await loadCesiumEntities();
+    switchMode('3D-Anim');
+    if (windEnabled) startCesiumWind();
+}
+
+async function loadCesiumEntities() {
+    const startJD = Cesium.JulianDate.fromIso8601(flightRecords[0].isoDateTime);
+    const endJD   = Cesium.JulianDate.fromIso8601(flightRecords.at(-1).isoDateTime);
+    viewer.clock.startTime = startJD.clone();
+    viewer.clock.stopTime  = endJD.clone();
+    viewer.clock.currentTime = startJD.clone();
+
+    const positionProperty = new Cesium.SampledPositionProperty();
+    const staticPositions  = [];
+
+    for (const rec of flightRecords) {
+        const jd  = Cesium.JulianDate.fromIso8601(rec.isoDateTime);
+        const pos = Cesium.Cartesian3.fromDegrees(rec.lon, rec.lat, rec.alt);
+        positionProperty.addSample(jd, pos);
+        staticPositions.push(pos);
+    }
+
+    flightEntity = viewer.entities.add({
+        position: positionProperty,
+        orientation: new Cesium.VelocityOrientationProperty(positionProperty),
+        billboard: { image: paragliderIcon, scale: 0.15 },
+        path: { width: 2, material: Cesium.Color.RED, leadTime: 0, trailTime: 999999 }
+    });
+    staticLineEntity = viewer.entities.add({
+        polyline: { positions: staticPositions, width: 4, material: Cesium.Color.ORANGE, show: false }
+    });
+}
+
+
+// ── Cesium 3D wind particle system ───────────────────────────────────────────
+// Each particle is a Cesium.Billboard — an oriented arrow sprite rendered in
+// actual 3D world space. The sprite points UP by default; .rotation rotates it
+// to the screen-projected wind heading so arrows always point downwind.
+
+function startCesiumWind() {
+    if (cesiumWindListener) return;
+    if (!viewer) return;
+
+    if (cesiumWindBillboards) viewer.scene.primitives.remove(cesiumWindBillboards);
+    cesiumWindBillboards = viewer.scene.primitives.add(new Cesium.BillboardCollection({
+        scene: viewer.scene
+    }));
+
+    cesiumWind3DList = [];
+    for (let i = 0; i < CESIUM_WIND_COUNT; i++) {
+        cesiumWind3DList.push(spawnWindArrow(true));
+    }
+
+    if (!cesiumWindInfoCanvas) {
+        cesiumWindInfoCanvas = document.createElement('canvas');
+        cesiumWindInfoCanvas.style.cssText =
+            'position:absolute;bottom:24px;left:10px;pointer-events:none;z-index:8;border-radius:4px;overflow:hidden;';
+        cesiumWindInfoCanvas.width  = 320;
+        cesiumWindInfoCanvas.height = 30;
+        document.getElementById('cesiumContainer').appendChild(cesiumWindInfoCanvas);
+        cesiumWindInfoCtx = cesiumWindInfoCanvas.getContext('2d');
+    }
+    cesiumWindInfoCanvas.style.display = 'block';
+    cesiumWindLastMs = performance.now();
+
+    cesiumWindListener = viewer.scene.postRender.addEventListener(() => {
+        if (!windEnabled || currentEngine !== 'cesium') return;
+        updateCesiumWind3D();
+    });
+}
+
+function stopCesiumWind() {
+    if (cesiumWindListener)    { cesiumWindListener(); cesiumWindListener = null; }
+    if (cesiumWindBillboards)  { viewer.scene.primitives.remove(cesiumWindBillboards); cesiumWindBillboards = null; }
+    if (cesiumWindInfoCanvas)  cesiumWindInfoCanvas.style.display = 'none';
+    cesiumWind3DList = [];
+}
+
+// Spawn one arrow billboard at a random position inside the full IGC bbox.
+function spawnWindArrow(randomAge) {
+    const lon = windBBox.minLon + Math.random() * (windBBox.maxLon - windBBox.minLon);
+    const lat = windBBox.minLat + Math.random() * (windBBox.maxLat - windBBox.minLat);
+    const alt = windBBox.minAlt + Math.random() * (windBBox.maxAlt - windBBox.minAlt);
+    const maxAge = WIND_MIN_AGE_S + Math.random() * (WIND_MAX_AGE_S - WIND_MIN_AGE_S);
+    const age    = randomAge ? Math.random() * maxAge : 0;
+
+    // Per-particle turbulence personality — each arrow wobbles independently
+    const turbPhase  = Math.random() * Math.PI * 2;       // phase offset in oscillation
+    const turbAmp    = 0.18 + Math.random() * 0.32;       // rotation wobble amplitude (rad)
+    const turbFreq   = 0.4  + Math.random() * 1.1;        // oscillation frequency (Hz)
+    const scaleBase  = 0.85 + Math.random() * 0.30;       // tight variation around speed-driven base
+    const scaleFreq  = 0.3  + Math.random() * 0.8;        // pulse frequency (Hz)
+    const scaleAmp   = 0.15 + Math.random() * 0.25;       // pulse amplitude
+    const speedBias  = (Math.random() - 0.5) * 4;         // ±4 m/s local speed variation
+
+    const bb = cesiumWindBillboards.add({
+        position:    Cesium.Cartesian3.fromDegrees(lon, lat, alt),
+        image:       arrowSprites[0],
+        width:       ARROW_W,        // base size — scale drives actual rendered size
+        height:      ARROW_H,
+        color:       new Cesium.Color(1, 1, 1, 0),
+        rotation:    _windRotation,
+        alignedAxis: Cesium.Cartesian3.ZERO,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        scaleByDistance: new Cesium.NearFarScalar(500, 1.2, 80000, 0.25),
+    });
+
+    return { bb, lon, lat, alt, age, maxAge,
+             turbPhase, turbAmp, turbFreq,
+             scaleBase, scaleFreq, scaleAmp, speedBias };
+}
+
+function updateCesiumWind3D() {
+    if (!cesiumWindBillboards || !flightEntity) return;
+
+    const now  = performance.now();
+    const dtMs = Math.min(now - cesiumWindLastMs, 120);
+    cesiumWindLastMs = now;
+    const dtS  = dtMs / 1000;
+    const tSec = now / 1000;   // absolute time in seconds for oscillators
+
+    // Glider position & altitude for wind level blending
+    const gliderCart  = flightEntity.position.getValue(viewer.clock.currentTime);
+    if (!gliderCart) return;
+    const gliderCarto = Cesium.Cartographic.fromCartesian(gliderCart);
+    const gliderLat   = Cesium.Math.toDegrees(gliderCarto.latitude);
+    const gliderAlt   = gliderCarto.height;
+
+    // Mean wind vector — computed once per frame
+    const flightMs = new Date(flightRecords[0].isoDateTime).getTime() + clockSeconds * 1000;
+    const { u, v } = windUVatTime(flightMs, gliderAlt);
+    _windU = u; _windV = v;
+    _windSpeed = Math.sqrt(u * u + v * v);
+    // Mean rotation: arrow points INTO the wind direction (downwind)
+    _windRotation = -Math.atan2(u, v);
+
+    const uDegPerS = u * degPerMLon3D(gliderLat);
+    const vDegPerS = v * DEG_PER_M_LAT_3D;
+    const baseAlpha = Math.min(1, 0.35 + _windSpeed * 0.04);
+
+    for (const p of cesiumWind3DList) {
+        p.age += dtS * speedMultiplier;
+
+        if (p.age >= p.maxAge) {
+            cesiumWindBillboards.remove(p.bb);
+            const newP = spawnWindArrow(false);
+            Object.assign(p, newP);
+            continue;
+        }
+
+        // Advect by mean wind + small random vertical turbulence
+        p.lon += uDegPerS * dtS * speedMultiplier;
+        p.lat += vDegPerS * dtS * speedMultiplier;
+        p.alt += (Math.random() - 0.5) * 0.4 * speedMultiplier;
+        p.alt  = Math.max(windBBox.minAlt, Math.min(windBBox.maxAlt, p.alt));
+
+        // Wrap at bbox edges
+        if (p.lon < windBBox.minLon) p.lon = windBBox.maxLon;
+        else if (p.lon > windBBox.maxLon) p.lon = windBBox.minLon;
+        if (p.lat < windBBox.minLat) p.lat = windBBox.maxLat;
+        else if (p.lat > windBBox.maxLat) p.lat = windBBox.minLat;
+
+        // ── Per-particle independent variation ──────────────────────────────
+        // Rotation: mean direction + individual oscillating wobble
+        const wobble   = Math.sin(tSec * p.turbFreq * Math.PI * 2 + p.turbPhase) * p.turbAmp;
+        const rotation = _windRotation + wobble;
+
+        // Local speed (mean ± per-particle bias) — used for both scale and sprite
+        const localSpeed = Math.max(0, _windSpeed + p.speedBias);
+
+        // Scale: wind-speed base (calm=tiny, strong=larger) × per-particle pulse
+        // speed 0 → 0.30, speed 10 → 0.65, speed 20+ → 1.0 (clamped)
+        const speedScale = 0.30 + Math.min(1, localSpeed / 20) * 0.70;
+        const pulse    = 1 + Math.sin(tSec * p.scaleFreq * Math.PI * 2 + p.turbPhase) * p.scaleAmp;
+        const scale    = speedScale * p.scaleBase * pulse;
+
+        // Sprite: colour-coded by local speed
+        const sprite     = getArrowSprite(localSpeed);
+
+        // Fade in/out over lifetime
+        const life  = p.age / p.maxAge;
+        const alpha = Math.sin(life * Math.PI) * baseAlpha;
+
+        p.bb.position = Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.alt);
+        p.bb.rotation = rotation;
+        p.bb.scale    = scale;
+        p.bb.image    = sprite;
+        p.bb.color    = new Cesium.Color(1, 1, 1, alpha);
+    }
+
+    // HUD readout
+    if (cesiumWindInfoCtx) {
+        const ctx = cesiumWindInfoCtx;
+        ctx.clearRect(0, 0, 320, 30);
+        ctx.fillStyle = 'rgba(10,10,10,0.60)';
+        ctx.beginPath();
+        ctx.roundRect(0, 0, 320, 30, 4);
+        ctx.fill();
+        const dir = (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
+        ctx.font = '12px Arial';
+        ctx.fillStyle = 'rgba(255,255,255,0.92)';
+        ctx.fillText(
+            `💨 ${_windSpeed.toFixed(1)} m/s  ${Math.round(dir)}°  ▲ ${Math.round(gliderAlt)} m asl`,
+            8, 20
+        );
+    }
+}
+
+
+// ── Terrain rotation ──────────────────────────────────────────────────────────
+function toggleTerrainRotation() {
+    terrainRotationEnabled = !terrainRotationEnabled;
+    if (viewer) viewer.scene.screenSpaceCameraController.enableRotate = terrainRotationEnabled;
+    const btn = document.getElementById('rotateBtn');
+    btn.classList.toggle('active-orange', terrainRotationEnabled);
+    btn.textContent = terrainRotationEnabled ? '🔄 Rotate' : '🔒 Locked';
+}
+
+// ── Dynamic wall ──────────────────────────────────────────────────────────────
+function flownIndexAt(currentTime) {
+    let lo = 0, hi = flightJulianTimes.length - 1;
+    while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        Cesium.JulianDate.compare(flightJulianTimes[mid], currentTime) <= 0 ? (lo = mid) : (hi = mid - 1);
+    }
+    return lo;
+}
+
+function rebuildWall(upToIndex) {
+    if (upToIndex < 1) {
+        if (wallPrimitive) { viewer.scene.primitives.remove(wallPrimitive); wallPrimitive = null; }
+        wallLastIndex = upToIndex; return;
+    }
+    if (upToIndex === wallLastIndex) return;
+    wallLastIndex = upToIndex;
+    if (wallPrimitive) { viewer.scene.primitives.remove(wallPrimitive); wallPrimitive = null; }
+
+    const positions = [], maxH = [], minH = [];
+    for (let i = 0; i <= upToIndex; i++) {
+        const r = flightRecords[i];
+        positions.push(r.lon, r.lat); maxH.push(r.alt); minH.push(0);
+    }
+    const geometry = Cesium.WallGeometry.createGeometry(new Cesium.WallGeometry({
+        positions: Cesium.Cartesian3.fromDegreesArray(positions),
+        maximumHeights: maxH, minimumHeights: minH,
+        vertexFormat: Cesium.MaterialAppearance.MaterialSupport.BASIC.vertexFormat
+    }));
+    if (!geometry) return;
+
+    wallPrimitive = viewer.scene.primitives.add(new Cesium.Primitive({
+        geometryInstances: new Cesium.GeometryInstance({
+            geometry,
+            attributes: { color: Cesium.ColorGeometryInstanceAttribute.fromColor(Cesium.Color.CYAN.withAlpha(0.3)) }
+        }),
+        appearance: new Cesium.PerInstanceColorAppearance({ flat: false, translucent: true }),
+        asynchronous: false
+    }));
+}
+
+function startWallTracking() {
+    wallLastIndex = -1;
+    if (wallRenderListener) return;
+    wallRenderListener = viewer.clock.onTick.addEventListener(() => {
+        if (currentMode !== '3D-Anim') return;
+        rebuildWall(flownIndexAt(viewer.clock.currentTime));
+    });
+}
+
+function stopWallTracking() {
+    if (wallRenderListener) { wallRenderListener(); wallRenderListener = null; }
+    if (wallPrimitive) { viewer.scene.primitives.remove(wallPrimitive); wallPrimitive = null; }
+    wallLastIndex = -1;
+}
+
+// ── Cesium mode switching ─────────────────────────────────────────────────────
+function switchMode(mode) {
+    currentMode = mode;
+    document.getElementById('btn3DAnimation').classList.toggle('active', mode === '3D-Anim');
+    document.getElementById('btn3DStatic').classList.toggle('active',    mode === '3D-Static');
+    document.getElementById('btn2D').classList.toggle('active',          mode === '2D');
+    updateCameraMode();
+}
+
+function clearTracking() {
+    if (trackingRemoveListener) { trackingRemoveListener(); trackingRemoveListener = null; }
+    if (viewer) viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+}
+
+function updateCameraMode() {
+    if (!flightEntity) return;
+    clearTracking();
+
+    if (currentMode === '3D-Anim') {
+        viewer.scene.morphTo3D(0);
+        flightEntity.show = true;
+        staticLineEntity.polyline.show = false;
+        startWallTracking();
+        const pos = flightEntity.position.getValue(viewer.clock.currentTime);
+        if (pos) viewer.camera.lookAt(pos, new Cesium.Cartesian3(-CAMERA_DISTANCE, 0, CAMERA_HEIGHT));
+
+    } else if (currentMode === '3D-Static') {
+        viewer.scene.morphTo3D(0.5);
+        flightEntity.show = false;
+        staticLineEntity.polyline.show = true;
+        stopWallTracking();
+
+    } else if (currentMode === '2D') {
+        viewer.scene.morphTo2D(0.5);
+        flightEntity.show = true;
+        staticLineEntity.polyline.show = false;
+        stopWallTracking();
+        trackingRemoveListener = viewer.scene.postRender.addEventListener(() => {
+            const pos = flightEntity.position.getValue(viewer.clock.currentTime);
+            if (!pos) return;
+            viewer.camera.lookAt(pos, new Cesium.Cartesian3(-CAMERA_DISTANCE, 0, CAMERA_HEIGHT));
+        });
+    }
+}
+</script>
+</body>
+</html>
